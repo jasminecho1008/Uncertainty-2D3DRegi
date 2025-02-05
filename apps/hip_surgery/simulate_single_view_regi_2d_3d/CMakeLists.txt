@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2020-2022 Robert Grupp
+# Copyright (c) 2022 Robert Grupp
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -20,10 +20,11 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-add_subdirectory(pao)
+set(EXE_NAME "${XREG_EXE_PREFIX}simulate-single-view-regi-2d-3d")
 
-add_subdirectory(pelvis_single_view_regi_2d_3d)
+add_executable(${EXE_NAME} xreg_simulate_single_view_regi_2d_3d_main.cpp)
 
-add_subdirectory(sample_single_view_regi_2d_3d)
+target_link_libraries(${EXE_NAME} PUBLIC ${XREG_EXE_LIBS_TO_LINK})
 
-add_subdirectory(simulate_single_view_regi_2d_3d)
+install(TARGETS ${EXE_NAME})
+
