@@ -3,13 +3,6 @@
  *
  * Copyright (c) 2020-2022 Robert Grupp
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
  * (License text omitted for brevity)
  */
 
@@ -274,32 +267,51 @@ int main(int argc, char *argv[])
   // Sample pose parameters.
   MatMxN pose_param_samples = param_sampler->SamplePoseParams(num_samples, rng_eng);
 
-  // Containers to accumulate CSV data.
+  // Containers for CSV data.
   std::vector<CoordScalarList> pose_csv_rows;   // Flattened 4x4 pose matrices.
   std::vector<CoordScalarList> offset_csv_rows; // Decomposed offsets.
   pose_csv_rows.reserve(num_samples);
   offset_csv_rows.reserve(num_samples);
 
-  // Loop over each sample.
+  // --- Precompute transforms for projection-space shifting ---
+  // Compute the center of rotation in the volume.
+  const Pt3 center_of_rot_wrt_vol = ITKVol3DCenterAsPhysPt(ct_lin_att.GetPointer());
+  const auto &cam = data_from_h5.pd.cam;
+  // Compute the center of rotation in the projection frame.
+  const Pt3 center_of_rot_wrt_cam_proj_frame = cam.extrins *
+                                               data_from_h5.gt_cam_extrins_to_pelvis_vol.inverse() * center_of_rot_wrt_vol;
+  // Create the shift transforms.
+  FrameTransform cam_proj_shift_from_center = FrameTransform::Identity();
+  cam_proj_shift_from_center.matrix().block(0, 3, 3, 1) = center_of_rot_wrt_cam_proj_frame;
+  FrameTransform cam_proj_shift_to_center = FrameTransform::Identity();
+  cam_proj_shift_to_center.matrix().block(0, 3, 3, 1) = -center_of_rot_wrt_cam_proj_frame;
+  // These two transforms allow us to go from the projection frame (as defined by cam.extrins)
+  // to the volume’s coordinate frame.
+  const FrameTransform cam_extrins_to_center_of_rot_in_proj_frame =
+      cam_proj_shift_to_center * cam.extrins;
+  const FrameTransform center_of_rot_in_proj_frame_to_vol =
+      data_from_h5.gt_cam_extrins_to_pelvis_vol * cam.extrins_inv * cam_proj_shift_from_center;
+
+  // Container for final computed extrinsics.
+  std::vector<FrameTransform> sampled_cam_to_vol;
+  sampled_cam_to_vol.reserve(num_samples);
+
+  // --- Loop over each sample ---
   for (size_type sample_idx = 0; sample_idx < num_samples; ++sample_idx)
   {
     vout << "Processing sample index: " << sample_idx << std::endl;
 
-    // Compute the pose perturbation (SE3) and update the camera extrinsics.
+    // Compute pose perturbation and update the camera extrinsics.
     SE3OptVarsLieAlg se3;
     FrameTransform perturb = se3(pose_param_samples.col(sample_idx));
     FrameTransform sample_pose = perturb * data_from_h5.gt_cam_extrins_to_pelvis_vol;
 
-    // Save CSV data for the sample (flattened 4x4 matrix).
+    // Save the flattened 4x4 pose matrix.
     CoordScalarList tmp_pose_csv_row(16);
     int flat_idx = 0;
     for (int r = 0; r < 4; ++r)
-    {
       for (int c = 0; c < 4; ++c, ++flat_idx)
-      {
         tmp_pose_csv_row[flat_idx] = sample_pose.matrix()(r, c);
-      }
-    }
     pose_csv_rows.push_back(tmp_pose_csv_row);
 
     // Compute relative offset (difference from GT) and decompose it.
@@ -323,14 +335,36 @@ int main(int argc, char *argv[])
     tmp_decomp_offset_row[7] = trans_z;
     offset_csv_rows.push_back(tmp_decomp_offset_row);
 
-    // --- Generate primary DRR ---
-    // Create a copy of the projection data and update the camera pose.
+    // --- Generate primary DRR and edge images using the edge creator ---
+    // Update projection data with the new camera pose.
     ProjDataF32 pd_sample = data_from_h5.pd;
     pd_sample.cam.extrins = sample_pose;
-    // (Since there is no set_projection function, we simply update the camera in pd_sample.)
-    auto drr_img = ray_caster->proj(0);
 
-    // If necessary, rotate the raw DRR.
+    // Compute the final camera extrinsics using the precomputed projection-space shifts.
+    const FrameTransform cam_extrins_to_vol =
+        center_of_rot_in_proj_frame_to_vol * sample_pose * cam_extrins_to_center_of_rot_in_proj_frame;
+    sampled_cam_to_vol.push_back(cam_extrins_to_vol);
+
+    // Set up the edge creator.
+    EdgesFromRayCast edge_creator;
+    edge_creator.do_canny = true;
+    edge_creator.do_boundary = true;
+    edge_creator.do_occ = false;
+    // For primary DRR generation, we use the original camera intrinsics and volume.
+    edge_creator.cam = data_from_h5.pd.cam;
+    edge_creator.vol = ct_hu;
+    // For output, set the camera with respect to the volume.
+    edge_creator.cam_wrt_vols = {cam_extrins_to_vol};
+    vout << "Creating line-integral ray caster for DRR/edges..." << std::endl;
+    edge_creator.line_int_ray_caster = LineIntRayCasterFromProgOpts(po);
+    vout << "Creating depth ray caster for edge images..." << std::endl;
+    edge_creator.boundary_ray_caster = DepthRayCasterFromProgOpts(po);
+
+    vout << "Computing DRR and edge images..." << std::endl;
+    edge_creator(); // Run the edge creator.
+
+    // Retrieve the primary DRR.
+    auto drr_img = edge_creator.line_int_ray_caster->proj(0);
     if (need_to_rot_to_up)
     {
       vout << "    Rotating raw DRR to up..." << std::endl;
@@ -338,40 +372,19 @@ int main(int argc, char *argv[])
       FlipImageColumns(&drr_orig);
       FlipImageRows(&drr_orig);
     }
-
-    // Save raw DRR as NIfTI.
-    const std::string sample_idx_str = fmt::format("{:03d}", sample_idx);
+    std::string sample_idx_str = fmt::format("{:03d}", sample_idx);
     std::string drr_raw_filename = fmt::format("{}/drr_raw_{}.nii.gz", dst_dir_path, sample_idx_str);
     WriteITKImageToDisk(drr_img.GetPointer(), drr_raw_filename);
     vout << "Saved raw DRR: " << drr_raw_filename << std::endl;
 
-    // Remap DRR to 8-bit and save as PNG.
+    // Remap the DRR to 8-bit and save as PNG.
     cv::Mat drr_remap = ShallowCopyItkToOpenCV(ITKImageRemap8bpp(drr_img.GetPointer()).GetPointer()).clone();
     std::string drr_png_filename = fmt::format("{}/drr_remap_{}.png", dst_dir_path, sample_idx_str);
     cv::imwrite(drr_png_filename, drr_remap);
     vout << "Saved DRR remap PNG: " << drr_png_filename << std::endl;
 
-    // --- Generate edge images using the edge ray caster ---
-    // Set up the edge ray caster (using the original CT HU volume and camera intrinsics).
-    EdgesFromRayCast edge_creator;
-    edge_creator.do_canny = true;
-    edge_creator.do_boundary = true;
-    edge_creator.do_occ = false;
-    edge_creator.cam = data_from_h5.pd.cam; // use original camera intrinsics
-    edge_creator.vol = ct_hu;
-    vout << "Creating ray caster for edge images..." << std::endl;
-    edge_creator.line_int_ray_caster = LineIntRayCasterFromProgOpts(po);
-    vout << "Creating depth ray caster for edge images..." << std::endl;
-    edge_creator.boundary_ray_caster = DepthRayCasterFromProgOpts(po);
-    // Set the camera pose for edge generation.
-    edge_creator.cam_wrt_vols = {sample_pose};
-    vout << "Computing edge images..." << std::endl;
-    edge_creator(); // Run the edge caster.
-
-    // Retrieve the DRR from the edge caster.
-    auto edge_drr_img = edge_creator.line_int_ray_caster->proj(0);
-
-    // Process the edge image.
+    // --- Generate edge images ---
+    // Retrieve and process the edge image.
     cv::Mat edges_ocv = ShallowCopyItkToOpenCV(edge_creator.final_edge_img.GetPointer());
     edges_ocv *= 255;
     if (need_to_rot_to_up)
