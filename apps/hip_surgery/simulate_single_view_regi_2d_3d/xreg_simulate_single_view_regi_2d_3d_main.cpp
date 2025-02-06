@@ -1,10 +1,4 @@
-/*
- * MIT License
- *
- * Copyright (c) 2020-2022 Robert Grupp
- *
- * (License text omitted for brevity)
- */
+
 
 #include <fmt/format.h>
 #include <random>
