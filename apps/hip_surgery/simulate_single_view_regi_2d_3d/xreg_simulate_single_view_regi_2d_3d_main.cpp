@@ -229,12 +229,15 @@ int main(int argc, char *argv[])
     FlipImageRows(&proj_remap);
   }
 
-  // Use the full CT volume (HU) by masking with the pelvis label.
-  vout << "Masking CT volume (using full volume)..." << std::endl;
-  auto ct_hu = MakeVolListFromVolAndLabels(data_from_h5.ct_vol.GetPointer(),
-                                           data_from_h5.seg_vol.GetPointer(),
-                                           {static_cast<unsigned char>(1)},
-                                           -1000.0f)[0];
+  // vout << "Masking CT volume (using full volume)..." << std::endl;
+  // auto ct_hu = MakeVolListFromVolAndLabels(data_from_h5.ct_vol.GetPointer(),
+  //                                          data_from_h5.seg_vol.GetPointer(),
+  //                                          {static_cast<unsigned char>(1)},
+  //                                          -1000.0f)[0];
+
+  // *** Modification: Use the full CT volume instead of masking with the pelvis label.
+  vout << "Using full CT volume (HU)..." << std::endl;
+  auto ct_hu = data_from_h5.ct_vol;
 
   // Convert HU to linear attenuation.
   vout << "Converting CT (HU) to linear attenuation..." << std::endl;
@@ -274,23 +277,18 @@ int main(int argc, char *argv[])
   offset_csv_rows.reserve(num_samples);
 
   // --- Precompute transforms for projection-space shifting ---
-  // Compute the center of rotation in the volume.
   const Pt3 center_of_rot_wrt_vol = ITKVol3DCenterAsPhysPt(ct_lin_att.GetPointer());
   const auto &cam = data_from_h5.pd.cam;
-  // Compute the center of rotation in the projection frame.
   const Pt3 center_of_rot_wrt_cam_proj_frame = cam.extrins *
                                                data_from_h5.gt_cam_extrins_to_pelvis_vol.inverse() * center_of_rot_wrt_vol;
-  // Create the shift transforms.
   FrameTransform cam_proj_shift_from_center = FrameTransform::Identity();
   cam_proj_shift_from_center.matrix().block(0, 3, 3, 1) = center_of_rot_wrt_cam_proj_frame;
   FrameTransform cam_proj_shift_to_center = FrameTransform::Identity();
   cam_proj_shift_to_center.matrix().block(0, 3, 3, 1) = -center_of_rot_wrt_cam_proj_frame;
-  // These two transforms allow us to go from the projection frame (as defined by cam.extrins)
-  // to the volume’s coordinate frame.
-  const FrameTransform cam_extrins_to_center_of_rot_in_proj_frame =
-      cam_proj_shift_to_center * cam.extrins;
-  const FrameTransform center_of_rot_in_proj_frame_to_vol =
-      data_from_h5.gt_cam_extrins_to_pelvis_vol * cam.extrins_inv * cam_proj_shift_from_center;
+  const FrameTransform cam_extrins_to_center_of_rot_in_proj_frame = cam_proj_shift_to_center * cam.extrins;
+  const FrameTransform center_of_rot_in_proj_frame_to_vol = data_from_h5.gt_cam_extrins_to_pelvis_vol *
+                                                            cam.extrins_inv *
+                                                            cam_proj_shift_from_center;
 
   // Container for final computed extrinsics.
   std::vector<FrameTransform> sampled_cam_to_vol;
@@ -336,11 +334,9 @@ int main(int argc, char *argv[])
     offset_csv_rows.push_back(tmp_decomp_offset_row);
 
     // --- Generate primary DRR and edge images using the edge creator ---
-    // Update projection data with the new camera pose.
     ProjDataF32 pd_sample = data_from_h5.pd;
     pd_sample.cam.extrins = sample_pose;
 
-    // Compute the final camera extrinsics using the precomputed projection-space shifts.
     const FrameTransform cam_extrins_to_vol =
         center_of_rot_in_proj_frame_to_vol * sample_pose * cam_extrins_to_center_of_rot_in_proj_frame;
     sampled_cam_to_vol.push_back(cam_extrins_to_vol);
@@ -350,10 +346,10 @@ int main(int argc, char *argv[])
     edge_creator.do_canny = true;
     edge_creator.do_boundary = true;
     edge_creator.do_occ = false;
-    // For primary DRR generation, we use the original camera intrinsics and volume.
+    // For primary DRR generation, we use the original camera intrinsics and the full CT volume.
     edge_creator.cam = data_from_h5.pd.cam;
     edge_creator.vol = ct_hu;
-    // For output, set the camera with respect to the volume.
+    // For output, use the computed final camera extrinsics.
     edge_creator.cam_wrt_vols = {cam_extrins_to_vol};
     vout << "Creating line-integral ray caster for DRR/edges..." << std::endl;
     edge_creator.line_int_ray_caster = LineIntRayCasterFromProgOpts(po);
@@ -384,7 +380,6 @@ int main(int argc, char *argv[])
     vout << "Saved DRR remap PNG: " << drr_png_filename << std::endl;
 
     // --- Generate edge images ---
-    // Retrieve and process the edge image.
     cv::Mat edges_ocv = ShallowCopyItkToOpenCV(edge_creator.final_edge_img.GetPointer());
     edges_ocv *= 255;
     if (need_to_rot_to_up)
