@@ -20,7 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-set(EXE_NAME "${XREG_EXE_PREFIX}xreg_data_gen_2d_3d_assess")
+set(EXE_NAME "${XREG_EXE_PREFIX}data_gen_2d_3d_assess")
 
 add_executable(${EXE_NAME} xreg_data_gen_2d_3d_assess_main.cpp)
 
