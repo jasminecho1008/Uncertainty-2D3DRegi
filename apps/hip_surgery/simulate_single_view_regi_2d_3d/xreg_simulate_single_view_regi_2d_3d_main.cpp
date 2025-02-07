@@ -81,11 +81,20 @@ SamplingToolData ReadPelvisVolProjAndGtFromH5File(
 
   H5::Group spec_g = h5.openGroup(spec_id_str);
 
-  vout << "Reading full CT intensity volume (HU)..." << std::endl;
+  vout << "Reading intensity volume (HU)..." << std::endl;
   data.ct_vol = ReadITKImageH5Float3D(spec_g.openGroup("vol"));
 
   vout << "Reading segmentation volume..." << std::endl;
-  data.seg_vol = ReadITKImageH5UChar3D(spec_g.openGroup("vol-seg/image"));
+  const auto ct_labels = ReadITKImageH5UChar3D(spec_g.openGroup("vol-seg/image"));
+
+  std::vector<unsigned char> lut(256, 0);
+  lut[1] = 1; // left hemi-pelvis
+  lut[2] = 1; // right hemi-pelvis
+  lut[3] = 1; // vertebra
+  lut[4] = 1; // upper sacrum
+  lut[7] = 1; // lower sacrum
+  // std::vector<unsigned char> lut(256, 1);
+  data.seg_vol = RemapITKLabelMap<unsigned char>(ct_labels.GetPointer(), lut);
 
   H5::Group projs_g = spec_g.openGroup("projections");
   const std::string proj_idx_str = fmt::format("{:03d}", proj_idx);
@@ -235,17 +244,20 @@ int main(int argc, char *argv[])
   //                                          {static_cast<unsigned char>(1)},
   //                                          -1000.0f)[0];
 
-  // *** Modification: Use the full CT volume instead of masking with the pelvis label.
-  vout << "Using full CT volume (HU)..." << std::endl;
-  auto ct_hu = data_from_h5.ct_vol;
+  // // *** Modification: Use the full CT volume instead of masking with the pelvis label.
+  // vout << "Using full CT volume (HU)..." << std::endl;
+  // auto ct_hu = data_from_h5.ct_vol;
 
-  // Convert HU to linear attenuation.
-  vout << "Converting CT (HU) to linear attenuation..." << std::endl;
-  auto ct_lin_att = HUToLinAtt(ct_hu.GetPointer(), -1000.0f);
+  // // Convert HU to linear attenuation.
+  // vout << "Converting CT (HU) to linear attenuation..." << std::endl;
+  // auto ct_lin_att = HUToLinAtt(ct_hu.GetPointer(), -1000.0f);
 
-  // Create the primary (line integral) ray caster for DRR generation.
-  auto ray_caster = LineIntRayCasterFromProgOpts(po);
-  ray_caster->set_volume(ct_lin_att);
+  vout << "masking out no voxels and cropping..." << std::endl;
+  auto ct_hu = MakeVolListFromVolAndLabels(data_from_h5.ct_vol.GetPointer(), data_from_h5.seg_vol.GetPointer(),
+                                           {static_cast<unsigned char>(1)}, -1000.0f)[0];
+
+  vout << "converting HU --> Lin. Att." << std::endl;
+  auto ct_lin_att = HUToLinAtt(ct_hu.GetPointer());
 
   // Create output directory if it does not exist.
   const Path dst_dir = dst_dir_path;
@@ -347,7 +359,7 @@ int main(int argc, char *argv[])
     edge_creator.do_boundary = true;
     edge_creator.do_occ = false;
     // For primary DRR generation, we use the original camera intrinsics and the full CT volume.
-    edge_creator.cam = data_from_h5.pd.cam;
+    edge_creator.cam = cam;
     edge_creator.vol = ct_hu;
     // For output, use the computed final camera extrinsics.
     edge_creator.cam_wrt_vols = {cam_extrins_to_vol};
