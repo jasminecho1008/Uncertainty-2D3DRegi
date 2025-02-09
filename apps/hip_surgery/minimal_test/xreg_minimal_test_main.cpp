@@ -748,8 +748,6 @@
 //     return 0;
 // }
 
-No log mapping
-
 // xreg_minimal_test_main.cpp
 //
 // Minimal test application using xreg routines to:
@@ -796,7 +794,7 @@ No log mapping
 #include "xregITKLabelUtils.h" // For RemapITKLabelMap
 #include "xregHUToLinAtt.h"    // For HUToLinAtt
 
-    using namespace xreg;
+using namespace xreg;
 
 // Define ITK image types.
 using CTImageType = itk::Image<float, 3>;
